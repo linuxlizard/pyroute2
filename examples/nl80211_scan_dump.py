@@ -30,6 +30,19 @@ def print_ext_capabilities(extcapa):
     print("\tExtended capabilities:\n\t\t* " + s)
 
 
+def print_country(country):
+    isocode = country[0].value
+    environment = country[1].value
+    print("\tCountry: {}\tEnvironment: {}".format(isocode, environment))
+    if len(country.fields) == 2:
+        print("\t\tNo country IE triplets present")
+        return
+
+    for triplet in country[2].value:
+        if triplet[0].name == "First Channel":
+            print("\t\tChannels [{0} - {1}] @ {2} dBm".format(
+                triplet[0].value, triplet[0].value+triplet[1].value-1, triplet[2].value))
+
 def print_ht_capabilities(ht_capa):
     if not ht_capa:
         return
@@ -164,11 +177,14 @@ def print_bss(bss):
     except KeyError:
         pass
 
-    print("\tCountry: TODO")
+    try:
+        print_country(ies["NL80211_BSS_ELEMENTS_COUNTRY"])
+    except KeyError:
+        pass
 
     try:
         print("\tExtended supported rates: {}".format(
-              ies["NL80211_BSS_ELEMENTS_EXTENDED_RATES"]))
+              ies["NL80211_BSS_ELEMENTS_EXTENDED_RATE"].pretty_print()))
     except KeyError:
         pass
 

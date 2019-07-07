@@ -326,9 +326,31 @@ def test_oui():
         end = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
         print(vendor)
 
+def test_ssid():
+    # check for evil ssid decoding
+    import struct
+    evil_ssid = (
+    for ssid in evil_ssid:
+        print(ssid)
+
+        buf = bytes(ssid,"utf8")
+        print(buf)
+        ie_id = 1
+        data = struct.pack("%ds"%len(buf), buf)
+        ssid_ie = nl80211.SSID(data)
+        ssid_ie.decode()
+        new_ssid = ssid_ie.pretty_print()
+        print(new_ssid)
+        assert len(ssid) == len(new_ssid), (len(ssid), len(new_ssid))
+
+        print(hexdump(buf))
+        print(hexdump(ssid_ie.fields.value))
+        assert ssid == new_ssid
+        
 if __name__ == '__main__':
     test_oui()
-    test_json_encode("iw_scan_dump_rsp")
+    test_ssid()
+#    test_json_encode("iw_scan_dump_rsp")
 
     # interface name to dump scan results
 #    ifname = sys.argv[1]

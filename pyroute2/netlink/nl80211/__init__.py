@@ -148,6 +148,7 @@ NL80211_BSS_ELEMENTS_SSID = 0
 NL80211_BSS_ELEMENTS_SUPPORTED_RATES = 1
 NL80211_BSS_ELEMENTS_CHANNEL = 3
 NL80211_BSS_ELEMENTS_TIM = 5
+NL80211_BSS_ELEMENTS_COUNTRY = 7
 NL80211_BSS_ELEMENTS_HT_CAPABILITIES = 45
 NL80211_BSS_ELEMENTS_RSN = 48
 NL80211_BSS_ELEMENTS_EXTENDED_RATE = 50
@@ -280,10 +281,15 @@ class SSID(IE):
     def pretty_print(self):
         # TODO utf8 encoding of SSID is optional. Shouldn't be unconditionally 
         # treating as UTF8
+        #
         try:
-            return self.fields.value.decode("utf8")
+            s = self.fields.value.decode("utf8")
+            # TODO check for unprintable chars (how badly will this hose unicode????)
+            return s
         except UnicodeDecodeError:
-            return "(error! invalid unicode) " + hexdump(self.fields.value)
+            msg = "(error! SSID is invalid unicode) " + hexdump(self.fields.value)
+            log.error(msg)
+            return msg
 
 class Supported_Rates(IE):
     ID = 1
@@ -363,20 +369,91 @@ class TIM(IE):
     # Traffic Indication Map
     ID = 5
 
-    # TODO
-#    def decode(self):
-#        (count,
-#         period,
-#         bitmapc,
-#         bitmap0) = struct.unpack_from('BBBB',
-#                                       self.data,
-#                                       offset)
-#        return ("DTIM Count {0} DTIM Period {1} Bitmap Control 0x{2} "
-#                "Bitmap[0] 0x{3}".format(count,
-#                                         period,
-#                                         bitmapc,
-#                                         bitmap0))
+    def decode(self):
+        (count, period, bitmapc,) = struct.unpack('BBB', self.data[0:3])
+        bitmap_hex = hexdump(self.data[3:])
 
+        self.fields = [
+            IE.Value("DTIM Count", count),
+            IE.Value("DTIM Period", period),
+            IE.Value("Bitmap Control", bitmapc),
+            IE.Value("Bitmap", bitmap_hex)]
+
+    def pretty_print(self):
+        count = self.fields[0].value
+        period = self.fields[1].value
+        bitmapc = self.fields[2].value
+        bitmap = self.fields[3].value
+
+        return ("DTIM Count {0} DTIM Period {1} Bitmap Control 0x{2} "
+                "Bitmap {3}".format(count, period, bitmapc, bitmap))
+
+
+class Country(IE):
+    ID = 7
+
+    # iw scan.c print_country()
+    IEEE80211_COUNTRY_EXTENSION_ID  = 201 
+
+    def decode(self):
+        offset = 0
+        # hostile input opportunity: invalid length in country IE
+        if len(self.data) < 3:
+            log.error("invalid length=%d in country code", len(self.data))
+            return
+
+        country_bytes, = struct.unpack("3s", self.data[0:3])
+
+        # dot11CountryString Annex C, page 2787 80211_2016.pdf
+        # must be valid ISO-3166-1
+        # https://en.wikipedia.org/wiki/ISO_3166-1
+        # https://www.iso.org/iso-3166-country-codes.html (US$40? seriously?)
+        #
+        # beware hostile input; this field is usually treated as a printable
+        # string so need to do extra validation
+        iso3166_char = lambda byte : chr(byte) if byte >= ord('A') and byte <= ord('Z') else '?'
+        country_string = iso3166_char(country_bytes[0]) + iso3166_char(country_bytes[1])
+
+        environment = country_bytes[2]
+        if environment == ord(' '):
+            environment = "Indoor/Outdoor"
+        elif environment == ord('O'):
+            environment = "Outdoor only"
+        elif environment == ord('I'):
+            environment = "Indoor only"
+        elif environment == ord('X'):
+            environment = "Non-country"
+        else:
+            environment = "(invalid!)"
+
+        self.fields = [ IE.Value("Country", country_string), 
+                        IE.Value("Environment", environment),
+                      ]
+
+        if len(self.data) == 3:
+            # no country codes so can leave now
+            log.debug("No country IE triplets present")
+            return
+
+        # now the decode gets weird
+        # iw scan.c print_country()
+        offset = 3
+        subband_triplets = IE.Value("Subbands", [])
+        while offset+2 < len(self.data):
+            triplet = struct.unpack("BBB", self.data[offset:offset+3])
+            if triplet[0] >= self.IEEE80211_COUNTRY_EXTENSION_ID:
+                val_triplet = [IE.Value("Extension ID", triplet[0]), 
+                               IE.Value("Regulatory Class", triplet[1]),
+                               IE.Value("Coverage Class", triplet[2])]
+            else:
+                val_triplet = [IE.Value("First Channel", triplet[0]), 
+                               IE.Value("Number of Channels", triplet[1]),
+                               IE.Value("Max TX Power (dBm)", triplet[2])]
+            offset += 3
+
+            subband_triplets.value.append(val_triplet)
+
+        self.fields.append(subband_triplets)
 
 class HT_Capabilities(IE):
     # iw scan.c print_ht_capa()
@@ -1111,6 +1188,7 @@ class nl80211cmd(genlmsg):
                     NL80211_BSS_ELEMENTS_SUPPORTED_RATES: Supported_Rates,
                     NL80211_BSS_ELEMENTS_CHANNEL: DSSS_Parameter_Set,
                     NL80211_BSS_ELEMENTS_TIM: TIM,
+                    NL80211_BSS_ELEMENTS_COUNTRY: Country,
                     NL80211_BSS_ELEMENTS_HT_CAPABILITIES: HT_Capabilities,
                     NL80211_BSS_ELEMENTS_RSN: RSN,
                     NL80211_BSS_ELEMENTS_EXTENDED_RATE: Extended_Rates,
