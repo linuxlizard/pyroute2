@@ -223,6 +223,10 @@ NL80211_STA_FLAG_ASSOCIATED = 7
                                                   globals())
 
 
+OUI_IEEE = "00-0f-ac"
+OUI_MSFT = "00-50-f2"
+OUI_WFA = "50-6f-9a"
+
 class IE:
     # note: using the raw integers in the descendents so can keep the hierarchy
     # in numerical order
@@ -248,6 +252,9 @@ class IE:
 
     def __getitem__(self, idx):
         return self.fields[idx]
+
+    def format_oui(self, data):
+        return "%02x-%02x-%02x" % (data[0], data[1], data[2])
 
     def decode_integer(self, grammar, value):
         """An Information element consisting of a bit fields that fits into an
@@ -639,8 +646,165 @@ class HT_Capabilities(IE):
 class RSN(IE):
     # Robust Security Network
     ID = 48
-    # TODO
 
+    # table 9-131  "Cipher Suite Selectors" 80211_2016.pdf 
+    cipher_suite_selectors = (
+        "Use group cipher suite",
+        "WEP-40",
+        "TKIP", 
+        "Reserved",
+        "CCMP-128",
+        "WEP-104",
+        "Group addressed traffic not allowed",
+        "GCMP-128",
+        "GCMP-256",
+        "CCMP-256",
+        "BIP-GMAC-128",
+        "BIP-GMAC-256")
+
+    auth_type_name_list = (
+        "Reserved",
+        "IEEE 8021.X",
+        "PSK",
+        "FT/IEEE 802.1X",
+        "FT/PSK",
+        "IEEE 802.1X/SHA-256",
+        "PSK/SHA-256",
+        "TDLS/TPK",
+        "SAE",
+        "SAE",
+        "IEEE 802.1X/SUITE-B",
+        "IEEE 802.1X/SUITE-B-192",
+        "FT/IEEE 802.1X/SHA-384",
+        "FILS/SHA-256",
+        "FILS/SHA-384",
+        "FT/FILS/SHA-256",
+        "FT/FILS/SHA-384",
+        "OWE")
+
+    rsn_capabilities = (
+        IE.Grammar(0, 1, "Preauth"),
+        IE.Grammar(1, 1, "NoPairwise"),
+        IE.Grammar(2, 2, "PTKSA-RC"),
+        IE.Grammar(4, 2, "GTKSA-RC"),
+        IE.Grammar(6, 1, "MFP-required"),
+        IE.Grammar(7, 1, "MFP-capable"),
+        IE.Grammar(8, 1, "Joint Multi-Band RSNA"),
+        IE.Grammar(9, 1, "Peerkey-enabled"),
+        IE.Grammar(10, 1, "SPP-AMSDU-capable"),
+        IE.Grammar(11, 1, "SPP-AMSDU-required"),
+        IE.Grammar(12, 1, "PBAC"),
+        IE.Grammar(13, 2, "Ext Key ID"),
+        IE.Grammar(14, 2, "Reserved"),
+    )
+
+    # 9.4.2.25 RSNE  80211_2016.pdf
+    def decode(self):
+        # (this one is super messy)
+        # iw scan.c print_rsn() -> print_rsn_ie() -> _print_rsn_ie()
+        # So _print_rsn_ie() is the best place to start.
+        offset = 0
+        version = self.data[0] + (self.data[1] << 8)
+
+        self.fields = [IE.Value("Version", version), ]
+        offset += 2
+
+        # pretty much optional fields from here on down
+        # so have to carefully check len(self.data) after every field
+
+        # Group Data Cipher Suite
+        group = struct.unpack("4B", self.data[offset:offset+4])
+        self.fields.append( IE.Value("Group Cipher Suite", self._decode_cipher(group)))
+        offset += 4
+        if offset >= len(self.data): return
+
+        # Pairwise Cipher Suite Count
+        pairwise_count, = struct.unpack("<H", self.data[offset:offset+2])
+        self.fields.append(IE.Value("Pairwise Count", pairwise_count))
+        offset += 2
+        if offset >= len(self.data): return
+
+        # Pairwise Cipher Suite List
+        length = 4 * pairwise_count
+        fmt = "%dB" % length
+        pairwise_bytes = struct.unpack(fmt, self.data[offset:offset+length])
+        pairwise_list = [self._decode_cipher(pairwise_bytes[n:n+4]) for n in range(0, length, 4)]
+        self.fields.append(IE.Value("Pairwise Bytes", pairwise_list))
+        offset += length
+        if offset >= len(self.data): return
+
+        # AKM Suite Count
+        akm_suite_count, = struct.unpack("<H", self.data[offset:offset+2])
+        self.fields.append(IE.Value("AKM Suite Count", akm_suite_count))
+        offset += 2
+        if offset >= len(self.data): return
+
+        # AKM Suite List
+        length = 4 * akm_suite_count
+        fmt = "%dB" % length
+        akm_suite_bytes = struct.unpack(fmt, self.data[offset:offset+length])
+        akm_suite_list = [self._decode_auth(akm_suite_bytes[n:n+4]) for n in range(0,length,4)]
+        self.fields.append(IE.Value("AKM Suite", akm_suite_list))
+        offset += length
+        if offset >= len(self.data): return
+
+        # RSN Capabilities
+        rsn_capa, = struct.unpack("<H", self.data[offset:offset+2])
+        self.fields.append(IE.Value("RSN Capabilities", 
+                           self.decode_integer(self.rsn_capabilities, rsn_capa)))
+        offset += 2
+        if offset >= len(self.data): return
+
+        # PMKID Count
+        pmkid_count, = struct.unpack("<H", self.data[offset:offset+2])
+        self.fields.append(IE.Value("PMKID Count", pmkid_count))
+        offset += 2
+        if offset >= len(self.data): return
+
+        # PMKID List
+
+        # Group Management Cipher Suite
+
+
+    def _decode_cipher(self, bytelist):
+        # iw scan.c print_cipher()
+        oui = self.format_oui(bytelist[0:3])
+        suite_type = bytelist[3]
+
+        meaning = "Vendor-specific"
+        if oui == OUI_IEEE:
+            try:
+                meaning = self.cipher_suite_selectors[suite_type]
+            except IndexError:
+                meaning = "Reserved"
+        elif oui == OUI_MS:
+            # TODO
+            pass
+
+        return [IE.Value("OUI", oui),
+                IE.Value("Suite Type", suite_type), 
+                IE.Value("Suite Name", meaning),
+               ]
+
+    def _decode_auth(self, bytelist):
+        # iw scan.c print_auth()
+        oui = self.format_oui(bytelist[0:3])
+        suite_type = bytelist[3]
+
+        meaning = "Vendor-specific"
+        if oui == OUI_IEEE:
+            try:
+                meaning = self.auth_type_name_list[suite_type]
+            except IndexError:
+                meaning = "Reserved"
+        elif oui == OUI_MS:
+            # TODO
+            pass
+
+        return [IE.Value("OUI", oui),
+                IE.Value("Suite Type", suite_type), 
+                IE.Value("Suite Name", meaning),
+               ]
 
 class Extended_Rates(Supported_Rates):
     ID = 50
@@ -894,19 +1058,45 @@ class VHT_Capabilities(IE):
 
 class VHT_Operation(IE):
     ID = 192
-    # TODO
+
+    # note this differs from iw scan.c print_vht_oper()
+    # I'm going from 80211_2016.pdf  I think some fields were deprecated.
+    channel_width = (
+        "20 or 40 Mhz",
+        "80, 160, 80+80 MHz",
+        "160 MHz (deprecated)",
+        "80+80 Mhz (deprecated)"
+    )
 
     def decode(self):
-        # TODO
-        self.fields.append(-1)
+        offset = 0
+        oper_info = struct.unpack("3B", self.data[0:3])
+        offset += 3
+        self.fields.append(IE.Value("Operation Info",
+                            [IE.Value("Channel Width", oper_info[0]),
+                             IE.Value("Channel Center Frequency Segment 0", oper_info[1]),
+                             IE.Value("Channel Center Frequency Segment 1", oper_info[2]),
+                            ]))
 
+        # bitmap of 16-bits
+        vht_mcs_nss_set, = struct.unpack("<H", self.data[offset:offset+2])
+        self.fields.append(IE.Value("VHT-MSS and NSS Set", vht_mcs_nss_set))
+
+        offset += 2
+
+    def channel_width_str(self, value):
+        try:
+            return self.channel_width[value]
+        except IndexError:
+            return "Reserved"
+        
 
 class Vendor_Specific(IE):
     ID = 221
 
     def decode(self):
         # raw bytes
-        s = "%02x-%02x-%02x" % (self.data[0],self.data[1],self.data[2])
+        s = self.format_oui(self.data[0:3])
         try:
             vendor = oui.vendor_lookup(s.upper())
         except KeyError:
@@ -1210,6 +1400,7 @@ class nl80211cmd(genlmsg):
                     try:
                         msg_name = NL80211_BSS_ELEMENTS_VALUES[msg_type]
                     except KeyError:
+                        log.warning("unhandled IE element type=%d", msg_type)
                         if "TODO" in self.value:
                             self.value["TODO"].append(msg_type)
                         else:
