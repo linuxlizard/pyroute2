@@ -15,6 +15,8 @@ from pyroute2.netlink.generic import GenericNetlinkSocket
 from pyroute2.netlink.nlsocket import Marshal
 from pyroute2.netlink import nla
 from pyroute2.netlink import nla_base
+from pyroute2.common import hexdump
+from . import oui
 
 log = logging.getLogger(__name__)
 
@@ -273,27 +275,66 @@ class SSID(IE):
         # Be VERY careful with the SSID. Can contain hostile input.
         # SQL injection. Terminal characters. HTML injection. XSS. etc.
         fmt = '%is' % len(self.data)
-        self.fields.append(IE.Value("SSID", struct.unpack(fmt, self.data)[0]))
+        self.fields = IE.Value("SSID", struct.unpack(fmt, self.data)[0])
 
     def pretty_print(self):
         # TODO utf8 encoding of SSID is optional. Shouldn't be unconditionally 
         # treating as UTF8
-        return self.fields[0].value.decode("utf8")
+        try:
+            return self.fields.value.decode("utf8")
+        except UnicodeDecodeError:
+            return "(error! invalid unicode) " + hexdump(self.fields.value)
 
 class Supported_Rates(IE):
     ID = 1
 
+    def _decode_byte(self, byte):
+        # iw scan.c print_supprates()
+        r = byte & 0x7f
+        if r == BSS_MEMBERSHIP_SELECTOR_VHT_PHY and byte & 0x80:
+            # support for mandatory features required
+            rate = "VHT"
+        elif r == BSS_MEMBERSHIP_SELECTOR_HT_PHY and byte & 0x80:
+            # support for mandatory features required
+            rate = "HT"
+        else:
+            rate = float("%d.%d" % (r / 2, 5 * (r & 1)))
+
+        required = bool(byte & 0x80)
+
+        return (rate,required)
+        
     def decode(self):
-        offset = 0
-        length = len(self.data)
-        while offset < length:
-            byte, = struct.unpack_from('B', self.data, offset)
-            self.fields.append(byte)
-            offset += 1
+        # Supported Rates and BSS Membership Selectors
+        # 9.4.2.3 80211-2016.pdf
+        #
+        # "The Supported Rates and BSS Membership Selectors element and
+        # Extended Supported Rates and BSS Membership Selectors element in
+        # Beacon and Probe Response frames is used by STAs in order to avoid
+        # associating with a BSS if they do not support all of the data rates
+        # in the BSSBasicRateSet parameter or all of the BSS membership
+        # requirements in the BSSMembershipSelectorSet parameter."
+        #
+        # 11.1.4.6 80211-2016.pdf
+
+        fmt = "%dB" % len(self.data) 
+        decoded = [self._decode_byte(b) for b in struct.unpack(fmt, self.data)]
+
+        basic_rate_set = [rate[0] for rate in decoded if rate[1] and not isinstance(rate[0], str)]
+        oper_rate_set = [rate[0] for rate in decoded if not rate[1] and not isinstance(rate[0], str)]
+        memb_selector_set = [rate[0] for rate in decoded if isinstance(rate[0],str)]
+
+        self.fields = [ IE.Value("BSS Basic Rate Set", basic_rate_set),
+                        IE.Value("BSS Operational Rate Set", oper_rate_set),
+                        IE.Value("BSS Membership Selector Set", memb_selector_set),
+                      ]
 
     def pretty_print(self):
         string = ""
-        for byte in self.fields:
+        fmt = "%dB" % len(self.data) 
+        for byte in struct.unpack(fmt, self.data):
+            # if byte & 0x80 then it's a required rate
+            # following code from iw scan.c print_supprates()
             r = byte & 0x7f
             if r == BSS_MEMBERSHIP_SELECTOR_VHT_PHY and byte & 0x80:
                 string += "VHT"
@@ -310,11 +351,12 @@ class DSSS_Parameter_Set(IE):
     ID = 3
 
     def decode(self):
-        self.fields = list(struct.unpack('B', self.data))
+#        self.fields = list(struct.unpack('B', self.data))
+        self.fields = IE.Value("channel", struct.unpack('B', self.data)[0])
 
     def pretty_print(self):
         # single valued field
-        return "channel {}".format(self.fields[0])
+        return "channel {}".format(self.fields.value)
 
 
 class TIM(IE):
@@ -523,12 +565,9 @@ class RSN(IE):
     # TODO
 
 
-class Extended_Rates(IE):
+class Extended_Rates(Supported_Rates):
     ID = 50
-
-    # TODO
-    def decode(self):
-        self.fields.append(-1)
+    # same format as supported rates so this one is easy!
 
 
 class HT_Operation(IE):
@@ -788,6 +827,21 @@ class VHT_Operation(IE):
 class Vendor_Specific(IE):
     ID = 221
 
+    def decode(self):
+        # raw bytes
+        s = "%02x-%02x-%02x" % (self.data[0],self.data[1],self.data[2])
+        try:
+            vendor = oui.vendor_lookup(s.upper())
+        except KeyError:
+            vendor = "Unknown"
+        self.fields.append(IE.Value("Vendor Specific", 
+                                [
+                                   IE.Value("OUI", s),
+                                   IE.Value("vendor name", vendor),
+                                   IE.Value("raw", self.data)
+                                ]
+                          ))
+#        self.fields.append(IE.Value("Vendor Specific", hexdump(self.data)))
 
 class nl80211cmd(genlmsg):
     prefix = 'NL80211_ATTR_'
@@ -1089,7 +1143,11 @@ class nl80211cmd(genlmsg):
                     offset += 2
                     val = cls(self.data[offset:offset + length])
                     val.decode()
-                    self.value[msg_name] = val
+                    if msg_type == NL80211_BSS_ELEMENTS_VENDOR and msg_name in self.value:
+                        # append to existing vendorid
+                        self.value[msg_name].fields.extend(val.fields)
+                    else:
+                        self.value[msg_name] = val
                     offset += length
 
         class TSF(nla_base):
